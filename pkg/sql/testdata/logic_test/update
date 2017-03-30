@@ -276,6 +276,24 @@ statement error multiple assignments to the same column "b"
 UPDATE abc SET (b, c) = (10, 11), b = 12
 
 statement ok
+CREATE TABLE xyz (
+  x INT PRIMARY KEY,
+  y INT,
+  z INT
+)
+
+statement ok
+INSERT INTO xyz VALUES (111, 222, 333)
+
+statement ok
+UPDATE xyz SET (z, y) = (SELECT 666, 777), x = (SELECT 2)
+
+query III
+SELECT * from xyz
+----
+2 777 666
+
+statement ok
 CREATE TABLE pks (
   k1 INT,
   k2 INT,

@@ -201,22 +201,18 @@ func (p *planner) Update(
 	}
 	for _, expr := range exprs {
 		if expr.Tuple {
-			switch t := expr.Expr.(type) {
-			case (*parser.Tuple):
-				for _, e := range t.Exprs {
-					typ := updateCols[i].Type.ToDatumType()
-					e = fillDefault(e, typ, i, defaultExprs)
-					targets = append(targets, parser.SelectExpr{Expr: e})
-					desiredTypesFromSelect = append(desiredTypesFromSelect, typ)
-					i++
-				}
+			typedExpr, _ := expr.Expr.TypeCheck(&p.semaCtx, parser.TypeAny)
+			switch t := typedExpr.ResolvedType(); t.(type) {
+			case (parser.TTuple):
+				targets = append(targets, parser.SelectExpr{Expr: expr.Expr})
+				i += len(t.(parser.TTuple))
 			default:
 				return nil, fmt.Errorf("cannot use this expression to assign multiple columns: %s", expr.Expr)
 			}
 		} else {
 			typ := updateCols[i].Type.ToDatumType()
 			e := fillDefault(expr.Expr, typ, i, defaultExprs)
-			targets = append(targets, parser.SelectExpr{Expr: e})
+			targets = append(targets, parser.SelectExpr{Expr: &parser.Tuple{Exprs: []parser.Expr{e}}})
 			desiredTypesFromSelect = append(desiredTypesFromSelect, typ)
 			i++
 		}
@@ -237,19 +233,25 @@ func (p *planner) Update(
 	// using checkColumnType. This step also verifies that the expression
 	// types match the column types.
 	sel := rows.(*renderNode)
-	for i, target := range sel.render[exprTargetIdx:] {
+	currentColumn := 0
+	for _, target := range sel.render[exprTargetIdx:] {
 		// DefaultVal doesn't implement TypeCheck
-		if _, ok := target.(parser.DefaultVal); ok {
-			continue
-		}
-		// TODO(nvanbenschoten) isn't this TypeCheck redundant with the call to SelectClause?
-		typedTarget, err := parser.TypeCheck(target, &p.semaCtx, updateCols[i].Type.ToDatumType())
-		if err != nil {
-			return nil, err
-		}
-		err = sqlbase.CheckColumnType(updateCols[i], typedTarget.ResolvedType(), &p.semaCtx.Placeholders)
-		if err != nil {
-			return nil, err
+		// if _, ok := target.(parser.DefaultVal); ok {
+		// 	continue
+		// }
+		// ???
+
+		typedExpr, _ := target.TypeCheck(&p.semaCtx, updateCols[currentColumn].Type.ToDatumType())
+		switch t := typedExpr.ResolvedType(); t.(type) {
+		case (parser.TTuple):
+			for _, typ := range typedExpr.ResolvedType().(parser.TTuple) {
+				// TODO(nvanbenschoten) isn't this TypeCheck redundant with the call to SelectClause?
+				err = sqlbase.CheckColumnType(updateCols[currentColumn], typ, &p.semaCtx.Placeholders)
+				if err != nil {
+					return nil, err
+				}
+				currentColumn++
+			}
 		}
 	}
 
@@ -302,12 +304,19 @@ func (u *updateNode) Next(ctx context.Context) (bool, error) {
 
 	tracing.AnnotateTrace()
 
-	oldValues := u.run.rows.Values()
+	entireRow := u.run.rows.Values()
 
 	// Our updated value expressions occur immediately after the plain
 	// columns in the output.
-	updateValues := oldValues[len(u.tw.ru.FetchCols):]
-	oldValues = oldValues[:len(u.tw.ru.FetchCols)]
+	oldValues := entireRow[:len(u.tw.ru.FetchCols)]
+
+	updateValues := make(parser.Datums, 0, len(oldValues))
+	for _, tup := range entireRow[len(u.tw.ru.FetchCols):] {
+		// we expect that tup is a tuple
+		for _, typ := range tup.(*parser.DTuple).D {
+			updateValues = append(updateValues, typ)
+		}
+	}
 
 	u.checkHelper.loadRow(u.tw.ru.FetchColIDtoRowIndex, oldValues, false)
 	u.checkHelper.loadRow(u.updateColsIdx, updateValues, true)
